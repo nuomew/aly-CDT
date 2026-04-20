@@ -89,7 +89,7 @@ cd aliyun-traffic
 cp .env.example .env
 ```
 
-编辑 `.env` 文件，填写数据库和阿里云配置：
+安装后自动生成迁移需要编辑 `.env` 文件，填写数据库和阿里云配置：
 
 ```env
 DB_HOST=localhost
