@@ -151,8 +151,8 @@ server {
 ```bash
 #!/bin/bash
 PHP_PATH=/www/server/php/74/bin/php
-SCRIPT_PATH=/pan/acg/aly/api/cron.php
-LOG_PATH=/pan/acg/aly/logs/cron.log
+SCRIPT_PATH=/pan/aly/api/cron.php
+LOG_PATH=/pan/aly/logs/cron.log
 
 mkdir -p "$(dirname $LOG_PATH)"
 
