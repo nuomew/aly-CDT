@@ -149,7 +149,16 @@ server {
 计划任务 → 添加任务 → Shell脚本，执行周期建议5分钟：
 
 ```bash
-/www/server/php/82/bin/php /path/to/aliyun-traffic/api/cron.php
+#!/bin/bash
+PHP_PATH=/www/server/php/74/bin/php
+SCRIPT_PATH=/pan/acg/aly/api/cron.php
+LOG_PATH=/pan/acg/aly/logs/cron.log
+
+mkdir -p "$(dirname $LOG_PATH)"
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] 开始执行..." >> $LOG_PATH
+$PHP_PATH $SCRIPT_PATH >> $LOG_PATH 2>&1
+echo "" >> $LOG_PATH
 ```
 
 **Crontab 方式：**
