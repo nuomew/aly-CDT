@@ -43,7 +43,7 @@ foreach ($configs as $config) {
     $autoStartHour = intval($config['auto_start_hour'] ?? 0);
     $autoStartMinute = intval($config['auto_start_minute'] ?? 0);
     $maxTrafficGb = floatval($config['max_traffic_gb'] ?? 1000);
-    $alertThreshold = intval($config['alert_threshold'] ?? 80);
+    $shutdownThreshold = intval($config['shutdown_threshold'] ?? 95);
     $lastAutoShutdown = $config['last_auto_shutdown'] ?? null;
     $lastAutoStart = $config['last_auto_start'] ?? null;
     
@@ -105,7 +105,7 @@ foreach ($configs as $config) {
             $totalGB = $totalBytes / 1024 / 1024 / 1024;
             $trafficPercent = $maxTrafficGb > 0 ? ($totalGB / $maxTrafficGb) * 100 : 0;
             
-            if ($trafficPercent >= $alertThreshold) {
+            if ($trafficPercent >= $shutdownThreshold) {
                 // 检查今天是否已经执行过自动关机
                 $alreadyShutdownToday = false;
                 if ($lastAutoShutdown) {

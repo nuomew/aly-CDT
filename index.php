@@ -57,36 +57,79 @@ $configs = $db->fetchAll($sql, [$monthStart, $monthStart]);
 
 $today = date('Y-m-d');
 $yesterday = date('Y-m-d', strtotime('-1 day'));
+$dayBeforeYesterday = date('Y-m-d', strtotime('-2 day'));
 
-// 今日流量 - 取最新日期的记录（阿里云返回的是累计值）
-$sql = "SELECT SUM(traffic_out) as traffic_out, SUM(traffic_total) as traffic_total 
+// 今天最新累计流量（月累计值）
+$sql = "SELECT SUM(traffic_total) as traffic_total 
         FROM `{$prefix}traffic_records` 
-        WHERE `record_date` = (SELECT MAX(record_date) FROM `{$prefix}traffic_records`)";
-$todayStats = $db->fetchOne($sql);
-$todayStats = $todayStats ?: ['traffic_out' => 0, 'traffic_total' => 0];
+        WHERE `record_date` = (SELECT MAX(record_date) FROM `{$prefix}traffic_records` WHERE `record_date` >= ?)
+        AND id IN (SELECT MAX(id) FROM `{$prefix}traffic_records` WHERE `record_date` >= ? GROUP BY config_id, instance_id)";
+$todayCumulative = $db->fetchOne($sql, [$monthStart, $monthStart]);
+$todayCumulativeTotal = floatval($todayCumulative['traffic_total'] ?? 0);
 
-// 昨日流量 - 取昨天日期的记录
-$sql = "SELECT SUM(traffic_out) as traffic_out, SUM(traffic_total) as traffic_total 
-        FROM `{$prefix}traffic_records` WHERE `record_date` = ?";
-$yesterdayStats = $db->fetchOne($sql, [$yesterday]);
-$yesterdayStats = $yesterdayStats ?: ['traffic_out' => 0, 'traffic_total' => 0];
-
-// 本月流量 - 取最新日期的记录（阿里云返回的是月度累计值）
-$sql = "SELECT SUM(traffic_out) as traffic_out, SUM(traffic_total) as traffic_total 
+// 昨天最新累计流量
+$sql = "SELECT SUM(traffic_total) as traffic_total 
         FROM `{$prefix}traffic_records` 
-        WHERE `record_date` = (SELECT MAX(record_date) FROM `{$prefix}traffic_records` WHERE `record_date` >= ?)";
-$latestStats = $db->fetchOne($sql, [$monthStart]);
-$monthStats = [
-    'traffic_out' => $latestStats['traffic_out'] ?? 0,
-    'traffic_total' => $latestStats['traffic_total'] ?? 0
-];
+        WHERE `record_date` = ?
+        AND id IN (SELECT MAX(id) FROM `{$prefix}traffic_records` WHERE `record_date` = ? GROUP BY config_id, instance_id)";
+$yesterdayCumulative = $db->fetchOne($sql, [$yesterday, $yesterday]);
+$yesterdayCumulativeTotal = floatval($yesterdayCumulative['traffic_total'] ?? 0);
 
-$sql = "SELECT `record_date`, SUM(`traffic_out`) as traffic_out, SUM(`traffic_total`) as traffic_total 
+// 前天累计流量
+$sql = "SELECT SUM(traffic_total) as traffic_total 
+        FROM `{$prefix}traffic_records` 
+        WHERE `record_date` = ?
+        AND id IN (SELECT MAX(id) FROM `{$prefix}traffic_records` WHERE `record_date` = ? GROUP BY config_id, instance_id)";
+$dayBeforeCumulative = $db->fetchOne($sql, [$dayBeforeYesterday, $dayBeforeYesterday]);
+$dayBeforeCumulativeTotal = floatval($dayBeforeCumulative['traffic_total'] ?? 0);
+
+// 今日使用流量 = 今天累计 - 昨天累计
+$todayUsage = $todayCumulativeTotal - $yesterdayCumulativeTotal;
+if ($todayUsage < 0) $todayUsage = $todayCumulativeTotal;
+
+// 昨日使用流量 = 昨天累计 - 前天累计
+$yesterdayUsage = $yesterdayCumulativeTotal - $dayBeforeCumulativeTotal;
+if ($yesterdayUsage < 0) $yesterdayUsage = $yesterdayCumulativeTotal;
+
+// 本月流量 = 今天最新累计
+$monthTotalBytes = $todayCumulativeTotal;
+
+// 近7天流量趋势 - 计算每日增量
+$sql = "SELECT `record_date`, SUM(`traffic_total`) as traffic_total 
         FROM `{$prefix}traffic_records` 
         WHERE `record_date` >= DATE_SUB(CURDATE(), INTERVAL 7 DAY) 
+        AND id IN (SELECT MAX(id) FROM `{$prefix}traffic_records` r2 WHERE r2.record_date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY) GROUP BY config_id, instance_id, r2.record_date)
         GROUP BY `record_date` 
         ORDER BY `record_date` ASC";
-$weeklyStats = $db->fetchAll($sql);
+$dailyCumulatives = $db->fetchAll($sql);
+
+// 构建日期到累计值的映射
+$dailyMap = [];
+foreach ($dailyCumulatives as $row) {
+    $dailyMap[$row['record_date']] = floatval($row['traffic_total']);
+}
+
+// 计算每日增量
+$weeklyStats = [];
+$dates = array_keys($dailyMap);
+sort($dates);
+for ($i = 0; $i < count($dates); $i++) {
+    $currentDate = $dates[$i];
+    $currentTotal = $dailyMap[$currentDate];
+    
+    // 找前一天的数据
+    $prevDate = date('Y-m-d', strtotime($currentDate . ' -1 day'));
+    $prevTotal = isset($dailyMap[$prevDate]) ? $dailyMap[$prevDate] : 0;
+    
+    // 每日增量 = 当天累计 - 前一天累计
+    $dailyDelta = $currentTotal - $prevTotal;
+    if ($dailyDelta < 0) $dailyDelta = $currentTotal; // 跨月情况
+    
+    $weeklyStats[] = [
+        'record_date' => $currentDate,
+        'traffic_total' => $dailyDelta
+    ];
+}
 
 $sql = "SELECT ac.name, tr.traffic_out, tr.traffic_total 
         FROM `{$prefix}traffic_records` tr
@@ -104,13 +147,10 @@ foreach ($configs as $cfg) {
 }
 $totalTrafficPercent = $totalMaxTraffic > 0 ? min(100, round(($totalCurrentTraffic / $totalMaxTraffic) * 100, 1)) : 0;
 
-$todayTotalGB = ($todayStats['traffic_total'] ?? 0) / 1024 / 1024 / 1024;
-$yesterdayTotalGB = ($yesterdayStats['traffic_total'] ?? 0) / 1024 / 1024 / 1024;
-$dailyUsageGB = $todayTotalGB - $yesterdayTotalGB;
-if ($dailyUsageGB < 0) $dailyUsageGB = $todayTotalGB;
-
-$monthTotalGB = ($monthStats['traffic_total'] ?? 0) / 1024 / 1024 / 1024;
-$monthOutGB = ($monthStats['traffic_out'] ?? 0) / 1024 / 1024 / 1024;
+// 转换为GB显示
+$todayUsageGB = $todayUsage / 1024 / 1024 / 1024;
+$yesterdayUsageGB = $yesterdayUsage / 1024 / 1024 / 1024;
+$monthTotalGB = $monthTotalBytes / 1024 / 1024 / 1024;
 
 ?>
 <!DOCTYPE html>
@@ -802,21 +842,21 @@ $monthOutGB = ($monthStats['traffic_out'] ?? 0) / 1024 / 1024 / 1024;
             <div class="stat-card">
                 <div class="stat-card-header">
                     <div class="stat-icon out">
-                        <svg viewBox="0 0 24 24"><path d="M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z"/></svg>
+                        <svg viewBox="0 0 24 24"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-1.99.9-1.99 2L3 19c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM9 10H7v2h2v-2zm4 0h-2v2h2v-2zm4 0h-2v2h2v-2zm-8 4H7v2h2v-2zm4 0h-2v2h2v-2zm4 0h-2v2h2v-2z"/></svg>
                     </div>
                     <span class="stat-label">今日流量</span>
                 </div>
-                <div class="stat-value"><?php echo AliyunCdt::formatBytes($todayStats['traffic_total'] ?? 0); ?></div>
+                <div class="stat-value"><?php echo AliyunCdt::formatBytes($todayUsage); ?></div>
             </div>
             
             <div class="stat-card">
                 <div class="stat-card-header">
                     <div class="stat-icon total">
-                        <svg viewBox="0 0 24 24"><path d="M20 12l-1.41-1.41L13 16.17V4h-2v12.17l-5.58-5.59L4 12l8 8 8-8z"/></svg>
+                        <svg viewBox="0 0 24 24"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
                     </div>
                     <span class="stat-label">昨日流量</span>
                 </div>
-                <div class="stat-value"><?php echo AliyunCdt::formatBytes($yesterdayStats['traffic_total'] ?? 0); ?></div>
+                <div class="stat-value"><?php echo AliyunCdt::formatBytes($yesterdayUsage); ?></div>
             </div>
             
             <div class="stat-card">
@@ -826,7 +866,7 @@ $monthOutGB = ($monthStats['traffic_out'] ?? 0) / 1024 / 1024 / 1024;
                     </div>
                     <span class="stat-label">本月流量</span>
                 </div>
-                <div class="stat-value"><?php echo AliyunCdt::formatBytes($monthStats['traffic_total'] ?? 0); ?></div>
+                <div class="stat-value"><?php echo AliyunCdt::formatBytes($monthTotalBytes); ?></div>
             </div>
         </div>
         
@@ -1020,40 +1060,21 @@ $monthOutGB = ($monthStats['traffic_out'] ?? 0) / 1024 / 1024 / 1024;
         const autoRefreshInterval = <?php echo $autoRefreshInterval; ?>;
         
         const labels = weeklyData.map(item => item.record_date.substring(5));
-        const inTraffic = weeklyData.map(item => (item.traffic_in / 1024 / 1024 / 1024).toFixed(2));
-        const outTraffic = weeklyData.map(item => (item.traffic_out / 1024 / 1024 / 1024).toFixed(2));
+        const totalTraffic = weeklyData.map(item => (item.traffic_total / 1024 / 1024 / 1024).toFixed(2));
         
         const ctx = document.getElementById('trendChart').getContext('2d');
         const trendChart = new Chart(ctx, {
-            type: 'line',
+            type: 'bar',
             data: {
                 labels: labels,
                 datasets: [
                     {
-                        label: '入流量 (GB)',
-                        data: inTraffic,
-                        borderColor: '#11998e',
-                        backgroundColor: 'rgba(17, 153, 142, 0.1)',
-                        fill: true,
-                        tension: 0.4,
-                        pointRadius: 4,
-                        pointHoverRadius: 6,
-                        pointBackgroundColor: '#11998e',
-                        pointBorderColor: '#fff',
-                        pointBorderWidth: 2
-                    },
-                    {
-                        label: '出流量 (GB)',
-                        data: outTraffic,
-                        borderColor: '#f093fb',
-                        backgroundColor: 'rgba(240, 147, 251, 0.1)',
-                        fill: true,
-                        tension: 0.4,
-                        pointRadius: 4,
-                        pointHoverRadius: 6,
-                        pointBackgroundColor: '#f093fb',
-                        pointBorderColor: '#fff',
-                        pointBorderWidth: 2
+                        label: '每日使用流量 (GB)',
+                        data: totalTraffic,
+                        backgroundColor: 'rgba(102, 126, 234, 0.8)',
+                        borderColor: '#667eea',
+                        borderWidth: 1,
+                        borderRadius: 4
                     }
                 ]
             },

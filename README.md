@@ -12,7 +12,6 @@
 - **VNC 远程连接**：通过浏览器直接连接 ECS 实例控制台
 - **操作日志**：记录所有管理员操作，便于审计追踪
 - **定时任务**：支持 Cron 定时刷新流量数据
-- **账单查询**：支持AccessKey对应账号账单查询
 
 ## 技术栈
 
@@ -20,8 +19,9 @@
 |------|------|
 | PHP | 7.2+ |
 | MySQL | 5.6.50+ |
+| Redis | 7.4.3+（可选） |
 | Nginx | 任意版本 |
-| 阿里云 SDK | 通过 API 手动调用AccessKey |
+| 阿里云 SDK | 通过 API 手动调用（无需 Composer） |
 
 ## 目录结构
 
@@ -148,16 +148,8 @@ server {
 
 计划任务 → 添加任务 → Shell脚本，执行周期建议5分钟：
 
-```#!/bin/bash
-PHP_PATH=/www/server/php/74/bin/php
-SCRIPT_PATH=/pan/aly/api/cron.php
-LOG_PATH=/pan/aly/logs/cron.log
-
-mkdir -p "$(dirname $LOG_PATH)"
-
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] 开始执行..." >> $LOG_PATH
-$PHP_PATH $SCRIPT_PATH >> $LOG_PATH 2>&1
-echo "" >> $LOG_PATH
+```bash
+/www/server/php/82/bin/php /path/to/aliyun-traffic/api/cron.php
 ```
 
 **Crontab 方式：**

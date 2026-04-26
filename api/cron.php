@@ -145,12 +145,15 @@ function checkTrafficAlerts($db, $prefix)
     $monthStart = date('Y-m-01');
     
     $sql = "SELECT ac.*, 
-            COALESCE(SUM(tr.traffic_total), 0) as month_traffic
+            COALESCE((SELECT SUM(tr2.traffic_total) 
+                FROM `{$prefix}traffic_records` tr2 
+                WHERE tr2.config_id = ac.id AND tr2.record_date >= ? 
+                AND tr2.id = (SELECT MAX(tr3.id) FROM `{$prefix}traffic_records` tr3 WHERE tr3.config_id = ac.id AND tr3.instance_id = tr2.instance_id AND tr3.record_date >= ?)
+            ), 0) as month_traffic
             FROM `{$prefix}aliyun_config` ac 
-            LEFT JOIN `{$prefix}traffic_records` tr ON ac.id = tr.config_id AND tr.record_date >= ? 
             WHERE ac.status = 1
             GROUP BY ac.id";
-    $configs = $db->fetchAll($sql, [$monthStart]);
+    $configs = $db->fetchAll($sql, [$monthStart, $monthStart]);
     
     if (empty($configs)) {
         return ['sent' => false, 'message' => '没有启用的配置'];

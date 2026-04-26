@@ -142,12 +142,15 @@ function checkAndSendAlert($db, $prefix, $config, $totalTrafficGB)
     $monthStart = date('Y-m-01');
     
     $sql = "SELECT ac.*, 
-            COALESCE(SUM(tr.traffic_total), 0) as month_traffic
+            COALESCE((SELECT SUM(tr2.traffic_total) 
+                FROM `{$prefix}traffic_records` tr2 
+                WHERE tr2.config_id = ac.id AND tr2.record_date >= ? 
+                AND tr2.id = (SELECT MAX(tr3.id) FROM `{$prefix}traffic_records` tr3 WHERE tr3.config_id = ac.id AND tr3.instance_id = tr2.instance_id AND tr3.record_date >= ?)
+            ), 0) as month_traffic
             FROM `{$prefix}aliyun_config` ac 
-            LEFT JOIN `{$prefix}traffic_records` tr ON ac.id = tr.config_id AND tr.record_date >= ? 
             WHERE ac.status = 1
             GROUP BY ac.id";
-    $configs = $db->fetchAll($sql, [$monthStart]);
+    $configs = $db->fetchAll($sql, [$monthStart, $monthStart]);
     
     if (empty($configs)) {
         return ['sent' => false, 'message' => '没有启用的配置'];
@@ -218,8 +221,10 @@ function checkTrafficAlert($db, $prefix, $config)
     $monthStart = date('Y-m-01');
     $today = date('Y-m-d');
     
-    $sql = "SELECT SUM(traffic_total) as total FROM `{$prefix}traffic_records` WHERE `record_date` >= ?";
-    $result = $db->fetchOne($sql, [$monthStart]);
+    $sql = "SELECT SUM(traffic_total) as total FROM `{$prefix}traffic_records` 
+            WHERE `record_date` >= ? 
+            AND id IN (SELECT MAX(id) FROM `{$prefix}traffic_records` WHERE record_date >= ? GROUP BY config_id, instance_id)";
+    $result = $db->fetchOne($sql, [$monthStart, $monthStart]);
     $currentTrafficBytes = $result['total'] ?? 0;
     $currentTrafficGB = $currentTrafficBytes / 1024 / 1024 / 1024;
     
@@ -250,8 +255,10 @@ function getStatus($db, $prefix, $config)
     $lastRefresh = getConfigValue($db, $prefix, 'last_refresh_time', '');
     
     $monthStart = date('Y-m-01');
-    $sql = "SELECT SUM(traffic_total) as total FROM `{$prefix}traffic_records` WHERE `record_date` >= ?";
-    $result = $db->fetchOne($sql, [$monthStart]);
+    $sql = "SELECT SUM(traffic_total) as total FROM `{$prefix}traffic_records` 
+            WHERE `record_date` >= ? 
+            AND id IN (SELECT MAX(id) FROM `{$prefix}traffic_records` WHERE record_date >= ? GROUP BY config_id, instance_id)";
+    $result = $db->fetchOne($sql, [$monthStart, $monthStart]);
     $currentTrafficGB = ($result['total'] ?? 0) / 1024 / 1024 / 1024;
     
     echo json_encode([

@@ -21,35 +21,57 @@ $stats['config_total'] = $result['count'];
 
 $today = date('Y-m-d');
 $yesterday = date('Y-m-d', strtotime('-1 day'));
+$dayBeforeYesterday = date('Y-m-d', strtotime('-2 day'));
 $monthStart = date('Y-m-01');
 
-// 今日流量 - 取最新日期的记录（阿里云返回的是累计值）
-$sql = "SELECT SUM(traffic_out) as traffic_out, SUM(traffic_total) as traffic_total 
+// 今天最新累计流量（月累计值）
+$sql = "SELECT SUM(traffic_total) as traffic_total 
         FROM `{$prefix}traffic_records` 
-        WHERE `record_date` = (SELECT MAX(record_date) FROM `{$prefix}traffic_records`)";
-$result = $db->fetchOne($sql);
-$stats['today_traffic'] = $result ?: ['traffic_out' => 0, 'traffic_total' => 0];
+        WHERE `record_date` = (SELECT MAX(record_date) FROM `{$prefix}traffic_records` WHERE `record_date` >= ?)
+        AND id IN (SELECT MAX(id) FROM `{$prefix}traffic_records` WHERE `record_date` >= ? GROUP BY config_id, instance_id)";
+$result = $db->fetchOne($sql, [$monthStart, $monthStart]);
+$todayCumulativeTotal = floatval($result['traffic_total'] ?? 0);
 
-// 昨日流量 - 取昨天日期的记录
-$sql = "SELECT SUM(traffic_out) as traffic_out, SUM(traffic_total) as traffic_total 
-        FROM `{$prefix}traffic_records` WHERE `record_date` = ?";
-$result = $db->fetchOne($sql, [$yesterday]);
-$stats['yesterday_traffic'] = $result ?: ['traffic_out' => 0, 'traffic_total' => 0];
-
-// 本月流量 - 取最新日期的记录（阿里云返回的是月度累计值）
-$sql = "SELECT SUM(traffic_out) as traffic_out, SUM(traffic_total) as traffic_total 
+// 昨天最新累计流量
+$sql = "SELECT SUM(traffic_total) as traffic_total 
         FROM `{$prefix}traffic_records` 
-        WHERE `record_date` = (SELECT MAX(record_date) FROM `{$prefix}traffic_records` WHERE `record_date` >= ?)";
-$result = $db->fetchOne($sql, [$monthStart]);
-$stats['month_traffic'] = $result ?: ['traffic_out' => 0, 'traffic_total' => 0];
+        WHERE `record_date` = ?
+        AND id IN (SELECT MAX(id) FROM `{$prefix}traffic_records` WHERE `record_date` = ? GROUP BY config_id, instance_id)";
+$result = $db->fetchOne($sql, [$yesterday, $yesterday]);
+$yesterdayCumulativeTotal = floatval($result['traffic_total'] ?? 0);
+
+// 前天累计流量
+$sql = "SELECT SUM(traffic_total) as traffic_total 
+        FROM `{$prefix}traffic_records` 
+        WHERE `record_date` = ?
+        AND id IN (SELECT MAX(id) FROM `{$prefix}traffic_records` WHERE `record_date` = ? GROUP BY config_id, instance_id)";
+$result = $db->fetchOne($sql, [$dayBeforeYesterday, $dayBeforeYesterday]);
+$dayBeforeCumulativeTotal = floatval($result['traffic_total'] ?? 0);
+
+// 今日使用流量 = 今天累计 - 昨天累计
+$todayUsageBytes = $todayCumulativeTotal - $yesterdayCumulativeTotal;
+if ($todayUsageBytes < 0) $todayUsageBytes = $todayCumulativeTotal;
+
+// 昨日使用流量 = 昨天累计 - 前天累计
+$yesterdayUsageBytes = $yesterdayCumulativeTotal - $dayBeforeCumulativeTotal;
+if ($yesterdayUsageBytes < 0) $yesterdayUsageBytes = $yesterdayCumulativeTotal;
+
+// 本月流量 = 今天最新累计
+$monthTotalBytes = $todayCumulativeTotal;
+
+// 转换为GB
+$todayTotal = $todayUsageBytes / 1024 / 1024 / 1024;
+$yesterdayTotal = $yesterdayUsageBytes / 1024 / 1024 / 1024;
+$monthTotal = $monthTotalBytes / 1024 / 1024 / 1024;
 
 $lastMonthStart = date('Y-m-01', strtotime('-1 month'));
 $lastMonthEnd = date('Y-m-t', strtotime('-1 month'));
-$sql = "SELECT SUM(traffic_out) as traffic_out, SUM(traffic_total) as traffic_total 
+$sql = "SELECT SUM(traffic_total) as traffic_total 
         FROM `{$prefix}traffic_records` 
-        WHERE `record_date` = (SELECT MAX(record_date) FROM `{$prefix}traffic_records` WHERE `record_date` BETWEEN ? AND ?)";
-$result = $db->fetchOne($sql, [$lastMonthStart, $lastMonthEnd]);
-$stats['last_month_traffic'] = $result ?: ['traffic_out' => 0, 'traffic_total' => 0];
+        WHERE `record_date` = (SELECT MAX(record_date) FROM `{$prefix}traffic_records` WHERE `record_date` BETWEEN ? AND ?)
+        AND id IN (SELECT MAX(id) FROM `{$prefix}traffic_records` r2 WHERE r2.record_date BETWEEN ? AND ? GROUP BY config_id, instance_id)";
+$result = $db->fetchOne($sql, [$lastMonthStart, $lastMonthEnd, $lastMonthStart, $lastMonthEnd]);
+$lastMonthTotal = floatval($result['traffic_total'] ?? 0) / 1024 / 1024 / 1024;
 
 $sql = "SELECT COUNT(DISTINCT `record_date`) as days FROM `{$prefix}traffic_records` WHERE `record_date` >= ?";
 $result = $db->fetchOne($sql, [$monthStart]);
@@ -59,20 +81,48 @@ $sql = "SELECT COUNT(*) as count FROM `{$prefix}traffic_records` WHERE `record_d
 $result = $db->fetchOne($sql, [$monthStart]);
 $stats['record_count'] = $result['count'];
 
+// 近7天流量趋势 - 计算每日增量
 $sql = "SELECT `record_date`, SUM(traffic_total) as traffic_total 
         FROM `{$prefix}traffic_records` 
         WHERE `record_date` >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+        AND id IN (SELECT MAX(id) FROM `{$prefix}traffic_records` r2 WHERE r2.record_date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY) GROUP BY config_id, instance_id, r2.record_date)
         GROUP BY `record_date` 
         ORDER BY `record_date` ASC";
-$trendData = $db->fetchAll($sql);
+$trendRawData = $db->fetchAll($sql);
+
+// 构建日期到累计值的映射并计算每日增量
+$dailyMap = [];
+foreach ($trendRawData as $row) {
+    $dailyMap[$row['record_date']] = floatval($row['traffic_total']);
+}
+
+$chartLabels = [];
+$chartData = [];
+$dates = array_keys($dailyMap);
+sort($dates);
+foreach ($dates as $i => $currentDate) {
+    $chartLabels[] = date('m/d', strtotime($currentDate));
+    $currentTotal = $dailyMap[$currentDate];
+    
+    // 找前一天的数据
+    $prevDate = date('Y-m-d', strtotime($currentDate . ' -1 day'));
+    $prevTotal = isset($dailyMap[$prevDate]) ? $dailyMap[$prevDate] : 0;
+    
+    // 每日增量 = 当天累计 - 前一天累计
+    $dailyDelta = $currentTotal - $prevTotal;
+    if ($dailyDelta < 0) $dailyDelta = $currentTotal; // 跨月情况
+    
+    $chartData[] = round($dailyDelta / 1024 / 1024 / 1024, 2);
+}
 
 $sql = "SELECT ac.name, tr.traffic_total 
         FROM `{$prefix}traffic_records` tr
         JOIN `{$prefix}aliyun_config` ac ON tr.config_id = ac.id
         WHERE tr.record_date = (SELECT MAX(record_date) FROM `{$prefix}traffic_records` WHERE `record_date` >= ?)
+        AND tr.id IN (SELECT MAX(id) FROM `{$prefix}traffic_records` r2 WHERE r2.record_date >= ? GROUP BY config_id, instance_id)
         ORDER BY tr.traffic_total DESC
         LIMIT 5";
-$topInstances = $db->fetchAll($sql, [$monthStart]);
+$topInstances = $db->fetchAll($sql, [$monthStart, $monthStart]);
 
 $sql = "SELECT ac.*, 
         COALESCE((SELECT tr2.traffic_total FROM `{$prefix}traffic_records` tr2 WHERE tr2.config_id = ac.id AND tr2.record_date >= ? ORDER BY tr2.record_date DESC LIMIT 1), 0) as month_traffic,
@@ -82,23 +132,11 @@ $sql = "SELECT ac.*,
         ORDER BY ac.is_default DESC, ac.id ASC";
 $configTraffic = $db->fetchAll($sql, [$monthStart, $monthStart]);
 
-$todayTotal = ($stats['today_traffic']['traffic_total'] ?? 0) / 1024 / 1024 / 1024;
-$yesterdayTotal = ($stats['yesterday_traffic']['traffic_total'] ?? 0) / 1024 / 1024 / 1024;
+// 今日vs昨日变化率
 $dayChange = $yesterdayTotal > 0 ? round(($todayTotal - $yesterdayTotal) / $yesterdayTotal * 100, 1) : 0;
 
-$monthTotal = ($stats['month_traffic']['traffic_total'] ?? 0) / 1024 / 1024 / 1024;
-$lastMonthTotal = ($stats['last_month_traffic']['traffic_total'] ?? 0) / 1024 / 1024 / 1024;
+// 本月vs上月变化率
 $monthChange = $lastMonthTotal > 0 ? round(($monthTotal - $lastMonthTotal) / $lastMonthTotal * 100, 1) : 0;
-
-$monthOutTraffic = ($stats['month_traffic']['traffic_out'] ?? 0) / 1024 / 1024 / 1024;
-$monthTotal = $monthOutTraffic;
-
-$chartLabels = [];
-$chartData = [];
-foreach ($trendData as $row) {
-    $chartLabels[] = date('m/d', strtotime($row['record_date']));
-    $chartData[] = round($row['traffic_total'] / 1024 / 1024 / 1024, 2);
-}
 
 $avgDailyTraffic = $stats['record_days'] > 0 ? $monthTotal / $stats['record_days'] : 0;
 $remainingDays = date('t') - date('j');
